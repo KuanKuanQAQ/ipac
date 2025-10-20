@@ -1,0 +1,3 @@
+ipac_watchpoint_ko 注册 ipac_watchpoint 设备用于为用户态提供 watchpoint 设置接口。
+ipac_watchpoint_app 为设置 watchpoint 的用户态程序。
+可以设置 2GB wathcpoint，设置过程指定内核，没有 watchpoint 异常恢复机制。

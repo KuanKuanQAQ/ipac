@@ -16,6 +16,9 @@
 #include <linux/kallsyms.h>
 #include <linux/tty.h>
 #include <linux/file.h>
+#include <linux/notifier.h>
+#include <linux/kdebug.h>
+#include <asm/esr.h> 
 
 #define GPIO_NUMBER    149     // User LED 0. GPIO number 149. Page 71 of BB-xM Sys Ref Manual.
 #define IOCTL_SET_WATCHPOINT _IO('k', 1)
@@ -50,11 +53,89 @@ static char *set_devnode(const struct device *dev, umode_t *mode)
 	asm volatile("mcr p14, 0, %0, " #N "," #M ", " #OP2 : : "r" (VAL));\
 } while (0)
 
+
+static int wp_die_handler(struct notifier_block *nb,
+                          unsigned long val, void *data)
+{
+    struct die_args *args = data;
+    unsigned int ec;
+
+    ec = ESRC_ELx_EC(args->err);  // 从 ESR_EL1 提取 EC 字段
+
+    // ARM64 Watchpoint from lower EL
+    if (ec == ESR_ELx_EC_WATCHPT_EL1) {  // 0x34
+        pr_info("Watchpoint hit at PC=0x%lx\n", args->regs->pc);
+        return NOTIFY_STOP;
+    }
+
+    return NOTIFY_DONE;
+}
+
+static struct notifier_block wp_nb = {
+    .notifier_call = wp_die_handler,
+    .priority = INT_MAX,
+};
+
+
+static void set_wp_each_cpu(void* info)
+{
+    struct watchpoint_set_request *state = info;
+    uint64_t mdscr_el1_val, oslsr_el1_val, oslar_el1_val, osdlr_el1_val, daif_val;
+    pr_info("set wp on CPU %d\n", smp_processor_id());
+
+    // set mdscr_el1.mde
+    asm volatile("mrs %x0, mdscr_el1" : "=r"(mdscr_el1_val));
+    printk("orig mdscr_el1: 0x%llx", mdscr_el1_val);
+    mdscr_el1_val |= (1UL << 15);
+    asm volatile("msr mdscr_el1, %x0" :: "r"(mdscr_el1_val));
+    // asm volatile("mrs %x0, mdscr_el1" : "=r"(mdscr_el1_val));
+    // printk("new mdscr_el1: 0x%llx", mdscr_el1_val);
+
+    // clear process state D mask
+    asm volatile("mrs %x0, daif" : "=r"(daif_val));
+    printk("orig daif: 0x%llx", daif_val);
+    // daif_val &= (~(1UL << 9));
+    // asm volatile("msr daif, %x0" :: "r"(daif_val));
+
+    asm volatile("mrs %x0, oslsr_el1" : "=r"(oslsr_el1_val));
+    printk("orig oslsr_el1: 0x%llx", oslsr_el1_val);
+
+    // oslar_el1 is write-only, cannot be read!
+    oslar_el1_val = 0;
+    asm volatile("msr oslar_el1, %x0\n\t" :: "r"(oslar_el1_val));
+    osdlr_el1_val = 0;
+    asm volatile("msr osdlr_el1, %x0\n\t" :: "r"(osdlr_el1_val));
+
+    printk("watchpoint addr: 0x%llx, ctrl: %x", state->addr, state->ctrl);
+    asm volatile("msr dbgwvr0_el1, %x0\n\t" :: "r"(state->addr));
+    asm volatile("msr dbgwcr0_el1, %x0\n\t" :: "r"(state->ctrl));
+
+    state->addr = 0;
+    state->ctrl = 0;
+    asm volatile("mrs %x0, dbgwvr0_el1\n\t" : "=r"(state->addr));
+    asm volatile("mrs %x0, dbgwcr0_el1\n\t" : "=r"(state->ctrl));
+    printk("watchpoint addr: 0x%llx, ctrl: %x", state->addr, state->ctrl);
+
+    asm volatile("isb\n\t");
+    
+}
+
+
+
+static void show_wp_each_cpu(void* info)
+{
+    int res;
+    struct watchpoint_set_request state;
+    asm volatile("mrs %x0, dbgwvr0_el1\n\t" : "=r"(state.addr));
+    asm volatile("mrs %x0, dbgwcr0_el1\n\t" : "=r"(state.ctrl));
+    state.id = 0;
+    res = copy_to_user(info, &state, sizeof(state));
+}
+
 // ioctl handler
 long ioctl_handler(struct file *file, unsigned int cmd, unsigned long arg)
 {
     int res;
-    uint64_t mdscr_el1_val, oslsr_el1_val, oslar_el1_val, osdlr_el1_val, daif_val;
     struct watchpoint_set_request state;
     // Handle the ioctl command
     if (cmd == IOCTL_SET_WATCHPOINT) {
@@ -63,53 +144,12 @@ long ioctl_handler(struct file *file, unsigned int cmd, unsigned long arg)
             printk("copy_from_user(%p) failed!", (void*)arg);
             return -1;
         }
-        
-        // set mdscr_el1.mde
-        asm volatile("mrs %x0, mdscr_el1" : "=r"(mdscr_el1_val));
-        printk("orig mdscr_el1: 0x%llx", mdscr_el1_val);
-        // mdscr_el1_val |= (1UL << 15);
-        // asm volatile("msr mdscr_el1, %x0" :: "r"(mdscr_el1_val));
-        // asm volatile("mrs %x0, mdscr_el1" : "=r"(mdscr_el1_val));
-        // printk("new mdscr_el1: 0x%llx", mdscr_el1_val);
-
-        // clear process state D mask
-        asm volatile("mrs %x0, daif" : "=r"(daif_val));
-        printk("orig daif: 0x%llx", daif_val);
-        // daif_val &= (~(1UL << 9));
-        // asm volatile("msr daif, %x0" :: "r"(daif_val));
-
-        asm volatile("mrs %x0, oslsr_el1" : "=r"(oslsr_el1_val));
-        printk("orig oslsr_el1: 0x%llx", oslsr_el1_val);
-
-        // oslar_el1 is write-only, cannot be read!
-        oslar_el1_val = 0;
-        asm volatile("msr oslar_el1, %x0\n\t" :: "r"(oslar_el1_val));
-        osdlr_el1_val = 0;
-        asm volatile("msr osdlr_el1, %x0\n\t" :: "r"(osdlr_el1_val));
-
-        printk("watchpoint addr: 0x%llx, ctrl: %x", state.addr, state.ctrl);
-        asm volatile("msr dbgwvr0_el1, %x0\n\t" :: "r"(state.addr));
-        asm volatile("msr dbgwcr0_el1, %x0\n\t" :: "r"(state.ctrl));
-
-        state.addr = 0;
-        state.ctrl = 0;
-        asm volatile("mrs %x0, dbgwvr0_el1\n\t" : "=r"(state.addr));
-        asm volatile("mrs %x0, dbgwcr0_el1\n\t" : "=r"(state.ctrl));
-        printk("watchpoint addr: 0x%llx, ctrl: %x", state.addr, state.ctrl);
-
-        asm volatile("isb\n\t");
+        on_each_cpu(set_wp_each_cpu, &state, 1);
     }
     else if (cmd == IOCTL_SHOW_WATCHPOINT) {
-        asm volatile("mrs %x0, dbgwvr0_el1\n\t" : "=r"(state.addr));
-        asm volatile("mrs %x0, dbgwcr0_el1\n\t" : "=r"(state.ctrl));
-        state.id = 0;
-        res = copy_to_user((void*)arg, &state, sizeof(state));
-        if (res) {
-            printk("copy_to_user(%p) failed!", (void*)arg);
-            return -1;
-        }
+        on_each_cpu(show_wp_each_cpu, (void*)arg, 1);
+
     }
-    printk("\n");
 
     return 0;
 }
@@ -154,7 +194,7 @@ static int __init ipac_watchpoint_init(void)
         unregister_chrdev_region(first, 1);
         return -1;
     }
- 
+    int res2 = register_die_notifier(&wp_nb);
     return 0;
 }
  

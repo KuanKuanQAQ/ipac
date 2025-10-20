@@ -13,7 +13,7 @@
 // Define the custom ioctl command
 #define IOCTL_SET_WATCHPOINT _IO('k', 1)
 #define IOCTL_SHOW_WATCHPOINT _IO('k', 2)
-#define MAP_SIZE (1UL << 20)
+#define MAP_SIZE (1UL << 32)
 
 typedef unsigned int __u32;
 typedef unsigned long long __u64;
@@ -72,29 +72,31 @@ int main()
         printf("ptr = %p\n", ptr);
     }
 
+    int *aligned_ptr = (int *)((((uint64_t)ptr + (1UL << 31) - 1) >> 31) << 31);
+
     int fd = open("/dev/ipac_watchpoint", O_RDWR);
     if (fd < 0) {
         perror("Failed to open the device");
         return -1;
     }
 
-    pin_to_core(1);
-    printf("[core1] display watchpoint\n");
+    printf("display watchpoint\n");
     ret = ioctl(fd, IOCTL_SHOW_WATCHPOINT, &state);
     if (ret < 0) {
         goto ioctl_fail;
     }
     print_watchpoint(&state);
 
-    pin_to_core(2);
-    printf("[core2] set watchpoint\n");
-    state.addr = (__u64)ptr;
-    state.ctrl = (__u32)(/*MASK*/(0x1fUL << 24) | /*BAS*/ (0xffUL << 5) | /*LSC*/(0x3UL << 3) | /*PAC*/(0x2UL << 1) | /*Enable*/0x1);
+    printf("set watchpoint\n");
+    // state.addr = (__u64)ptr;
+    state.addr = (__u64)aligned_ptr;
+    state.ctrl = (__u32)(/*MASK*/(0x1fUL << 24) | /*BAS*/ (0xffUL << 5) | /*LSC*/(0x2UL << 3) | /*PAC*/(0x2UL << 1) | /*Enable*/0x1);
     ret = ioctl(fd, IOCTL_SET_WATCHPOINT, &state);
     if (ret < 0) {
         goto ioctl_fail;
     }
 
+    /*
     // pin_to_core(1);
     printf("[core2] display watchpoint\n");
     ret = ioctl(fd, IOCTL_SHOW_WATCHPOINT, &state);
@@ -110,21 +112,15 @@ int main()
         goto ioctl_fail;
     }
     print_watchpoint(&state);
+    */
 
-    printf("[core2] display watchpoint\n");
-    ret = ioctl(fd, IOCTL_SHOW_WATCHPOINT, &state);
-    if (ret < 0) {
-        goto ioctl_fail;
-    }
-    print_watchpoint(&state);
+    // printf("try to memset mmap region\n");
+    // memset((void*)ptr, 'A', MAP_SIZE);
+    printf("try to read mmap region:\naligned_ptr[1024] = ");
+    printf("0x%x\n", aligned_ptr[1024]);
 
-    printf("try to memset mmap region\n");
-    memset((void*)ptr, 'A', MAP_SIZE);
-    printf("try to read mmap region:\nptr[1024] = ");
-    printf("0x%x\n", ptr[1024]);
-
-    printf("try to read mmap region:\nptr[0] = ");
-    printf("0x%x\n", ptr[0]);
+    // printf("try to write mmap region:\naligned_ptr[1025] = 0xdeadbeef");
+    // aligned_ptr[1025] = 0xdeadbeef;
 
     close(fd);
     return 0;

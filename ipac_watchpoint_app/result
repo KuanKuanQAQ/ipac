@@ -1,4 +1,0 @@
-ptr = 0xffff96c00000
-control: 0x1f001fe9
-dregs[0].addr: 0xffff96c00000
-dregs[0].ctrl: 0x1fed
